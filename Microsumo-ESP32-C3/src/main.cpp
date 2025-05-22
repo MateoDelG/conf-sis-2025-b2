@@ -53,67 +53,71 @@ void loop() {
     #endif
 }
 
+// Función que implementa el modo automático del robot
 void automaticMode() {
 
-  static unsigned long previousMillis = 0;
-  static unsigned long actionDuration = 0;
-  static int state = 0;
-  static bool recoveringLine = false;
+  // Variables estáticas para mantener el estado entre llamadas a la función
+  static unsigned long previousMillis = 0;     // Guarda el tiempo de la última acción
+  static unsigned long actionDuration = 0;     // Duración de la acción actual
+  static int state = 0;                        // Estado actual de la máquina de estados
+  static bool recoveringLine = false;          // Indica si el robot está recuperando la línea
 
+  // --- PRIORIDAD: Evitar salirse de la línea ---
+  // Si el sensor de línea detecta que el robot está saliendo del área permitida
+  if (SensorsManager::readLineSensor()) {
+    MotorsController::stop();        // Opcional: frena antes de corregir la trayectoria
+    MotorsController::backward();    // Retrocede para alejarse del borde
+    previousMillis = millis();       // Guarda el tiempo actual
+    actionDuration = 1000;           // Duración del retroceso (1 segundo)
+    state = -1;                      // Estado especial de recuperación
+    recoveringLine = true;           // Marca que está en proceso de recuperación
+    return;                          // Sale de la función para esperar a que termine la acción
+  }
 
-    // Prioridad: evitar salirse de la línea
-    if (SensorsManager::readLineSensor()) {
-      MotorsController::stop();  // opcional: frena antes de corregir
-      MotorsController::backward();
-      previousMillis = millis();
-      actionDuration = 1000;
-      state = -1; // estado especial de recuperación
-      recoveringLine = true;
+  // Obtiene el tiempo actual
+  unsigned long currentMillis = millis();
+
+  // Si ha pasado el tiempo de la acción anterior, se decide la siguiente acción
+  if (currentMillis - previousMillis >= actionDuration) {
+    previousMillis = currentMillis;  // Actualiza el tiempo de referencia
+
+    // Si estaba recuperando la línea, ahora gira a la izquierda para volver al área segura
+    if (recoveringLine) {
+      MotorsController::left();      // Gira a la izquierda
+      actionDuration = 1300;         // Duración del giro (1.3 segundos)
+      state = 0;                     // Vuelve al inicio de la secuencia de exploración
+      recoveringLine = false;        // Termina la recuperación
       return;
     }
 
-    unsigned long currentMillis = millis();
-
-    if (currentMillis - previousMillis >= actionDuration) {
-      previousMillis = currentMillis;
-
-      if (recoveringLine) {
-        // Segundo paso: giro a la izquierda tras retroceso
-        MotorsController::left();
-        actionDuration = 1300;
-        state = 0; // vuelve al inicio de la exploración
-        recoveringLine = false;
-        return;
-      }
-
-      // Secuencia de exploración del tablero
-      switch (state) {
-        case 0:
-          MotorsController::forward();
-          actionDuration = random(100, 1000);
-          state = 1;
-          break;
-        case 1:
-          MotorsController::right();
-          actionDuration = random(100, 1000);
-          state = 2;
-          break;
-        case 2:
-          MotorsController::forward();
-          actionDuration = random(100, 1000);
-          state = 3;
-          break;
-        case 3:
-          MotorsController::left();
-          actionDuration = random(100, 1000);
-          state = 4;
-          break;
-        case 4:
-          MotorsController::forward();
-          actionDuration = random(100, 1000);
-          state = 0;  // reinicia la secuencia
-          break;
-      }
-    
+    // --- SECUENCIA DE EXPLORACIÓN DEL TABLERO ---
+    // Máquina de estados para mover el robot de forma autónoma
+    switch (state) {
+      case 0:
+        MotorsController::forward();                 // Avanza hacia adelante
+        actionDuration = random(100, 1000);         // Tiempo aleatorio de avance
+        state = 1;                                  // Siguiente estado: giro a la derecha
+        break;
+      case 1:
+        MotorsController::right();                   // Gira a la derecha
+        actionDuration = random(100, 1000);         // Tiempo aleatorio de giro
+        state = 2;                                  // Siguiente estado: avanzar
+        break;
+      case 2:
+        MotorsController::forward();                 // Avanza hacia adelante
+        actionDuration = random(100, 1000);         // Tiempo aleatorio de avance
+        state = 3;                                  // Siguiente estado: giro a la izquierda
+        break;
+      case 3:
+        MotorsController::left();                    // Gira a la izquierda
+        actionDuration = random(100, 1000);         // Tiempo aleatorio de giro
+        state = 4;                                  // Siguiente estado: avanzar
+        break;
+      case 4:
+        MotorsController::forward();                 // Avanza hacia adelante
+        actionDuration = random(100, 1000);         // Tiempo aleatorio de avance
+        state = 0;                                  // Reinicia la secuencia
+        break;
+    }
   }
 }
