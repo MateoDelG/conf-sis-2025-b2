@@ -5,6 +5,12 @@
 namespace SensorsManager {
 void setupLine();
 bool readLineSensor();
+void setupVL6180X();
+int readDistance( int side);
+enum SensorSide {
+    RIGHT,
+    LEFT
+};
 }
 
 #endif

@@ -1,123 +1,338 @@
-#define BLE_MODE 1
-#define WIFI_MODE 2
-#define AUTOMATIC_MODE 3
-
 #include <Arduino.h>
-#include <Wire.h>
-#include "Adafruit_VL6180X.h"
+#include "GyroTurn.h"
 #include "MotorsController.h"
 #include "SensorsManager.h"
 
-#if ROBOT_MODE == BLE_MODE
-  #include "BLEManager.h"
-#endif
+GyroTurn gyro;
 
-#if ROBOT_MODE == WIFI_MODE
-  #include "WifiManager.h"
-#endif
+enum State
+{
+  TURN_RIGHT,
+  MOVE_FORWARD_1,
+  TURN_LEFT,
+  MOVE_FORWARD_2,
+  AVOID_LINE_BACK,
+  AVOID_LINE_TURN,
+  ATTACK // 🆕 Nuevo estado
+};
 
+State state = TURN_RIGHT;
+unsigned long movementStartTime = 0;
 
-void automaticMode();
-
-
-// the setup function runs once when you press reset or power the board
-void setup() {
+void setup()
+{
+  SensorsManager::setupVL6180X(); // Initialize distance sensor
   delay(5000);
   Serial.begin(115200);
-  pinMode(LED_BUILTIN, OUTPUT);
-
-
   MotorsController::setup();
-  SensorsManager::setupLine();
+  SensorsManager::setupLine(); // Initialize line sensors
 
+  gyro.begin();
+  gyro.resetAngle();
+  Serial.println("Calibrating...");
+  gyro.calibrate();
+  Serial.println("Calibration complete");
 
-  #if ROBOT_MODE == BLE_MODE
-    BLEManager::setupBLE();
-  #endif
-  #if ROBOT_MODE == WIFI_MODE
-    WifiManager::setup();
-  #endif
-
+  gyro.setAngle(90); // Initial right turn
 }
+void loop()
+{
+  const int ATTACK_THRESHOLD = 100; // milímetros
+  int distanceLeft = SensorsManager::readDistance(SensorsManager::LEFT);
+  int distanceRight = SensorsManager::readDistance(SensorsManager::RIGHT);
+  float angle = gyro.getCurrentAngle();
+  bool lineDetected = SensorsManager::readLineSensor();
 
-void loop() {
-  #if ROBOT_MODE == BLE_MODE
-    BLEManager::ensureAdvertising();
-  #endif
-  #if ROBOT_MODE == WIFI_MODE
-    WifiManager::run();
-  #endif
-
-  #if ROBOT_MODE == AUTOMATIC_MODE
-    automaticMode();
-    #endif
-}
-
-// Función que implementa el modo automático del robot
-void automaticMode() {
-
-  // Variables estáticas para mantener el estado entre llamadas a la función
-  static unsigned long previousMillis = 0;     // Guarda el tiempo de la última acción
-  static unsigned long actionDuration = 0;     // Duración de la acción actual
-  static int state = 0;                        // Estado actual de la máquina de estados
-  static bool recoveringLine = false;          // Indica si el robot está recuperando la línea
-
-  // --- PRIORIDAD: Evitar salirse de la línea ---
-  // Si el sensor de línea detecta que el robot está saliendo del área permitida
-  if (SensorsManager::readLineSensor()) {
-    MotorsController::stop();        // Opcional: frena antes de corregir la trayectoria
-    MotorsController::backward();    // Retrocede para alejarse del borde
-    previousMillis = millis();       // Guarda el tiempo actual
-    actionDuration = 1000;           // Duración del retroceso (1 segundo)
-    state = -1;                      // Estado especial de recuperación
-    recoveringLine = true;           // Marca que está en proceso de recuperación
-    return;                          // Sale de la función para esperar a que termine la acción
-  }
-
-  // Obtiene el tiempo actual
-  unsigned long currentMillis = millis();
-
-  // Si ha pasado el tiempo de la acción anterior, se decide la siguiente acción
-  if (currentMillis - previousMillis >= actionDuration) {
-    previousMillis = currentMillis;  // Actualiza el tiempo de referencia
-
-    // Si estaba recuperando la línea, ahora gira a la izquierda para volver al área segura
-    if (recoveringLine) {
-      MotorsController::left();      // Gira a la izquierda
-      actionDuration = 1300;         // Duración del giro (1.3 segundos)
-      state = 0;                     // Vuelve al inicio de la secuencia de exploración
-      recoveringLine = false;        // Termina la recuperación
-      return;
+  switch (state)
+  {
+  case TURN_RIGHT:
+    if (lineDetected)
+    {
+      Serial.println("⚠️ Line detected during TURN_RIGHT!");
+      MotorsController::stop();
+      movementStartTime = millis();
+      state = AVOID_LINE_BACK;
+      break;
     }
 
-    // --- SECUENCIA DE EXPLORACIÓN DEL TABLERO ---
-    // Máquina de estados para mover el robot de forma autónoma
-    switch (state) {
-      case 0:
-        MotorsController::forward();                 // Avanza hacia adelante
-        actionDuration = random(100, 1000);         // Tiempo aleatorio de avance
-        state = 1;                                  // Siguiente estado: giro a la derecha
-        break;
-      case 1:
-        MotorsController::right();                   // Gira a la derecha
-        actionDuration = random(100, 1000);         // Tiempo aleatorio de giro
-        state = 2;                                  // Siguiente estado: avanzar
-        break;
-      case 2:
-        MotorsController::forward();                 // Avanza hacia adelante
-        actionDuration = random(100, 1000);         // Tiempo aleatorio de avance
-        state = 3;                                  // Siguiente estado: giro a la izquierda
-        break;
-      case 3:
-        MotorsController::left();                    // Gira a la izquierda
-        actionDuration = random(100, 1000);         // Tiempo aleatorio de giro
-        state = 4;                                  // Siguiente estado: avanzar
-        break;
-      case 4:
-        MotorsController::forward();                 // Avanza hacia adelante
-        actionDuration = random(100, 1000);         // Tiempo aleatorio de avance
-        state = 0;                                  // Reinicia la secuencia
-        break;
+    if ((distanceLeft > 0 && distanceLeft < ATTACK_THRESHOLD) ||
+        (distanceRight > 0 && distanceRight < ATTACK_THRESHOLD))
+    {
+      Serial.println("🟥 Enemy detected during TURN_RIGHT! Attacking...");
+      MotorsController::forward();
+      movementStartTime = millis();
+      state = ATTACK;
+      break;
     }
+
+    MotorsController::right();
+    Serial.print("[Turning Right] Angle: ");
+    Serial.println(angle);
+    if (!gyro.isTurning())
+    {
+      MotorsController::stop();
+      movementStartTime = millis();
+      state = MOVE_FORWARD_1;
+    }
+    break;
+
+  case MOVE_FORWARD_1:
+    if (lineDetected)
+    {
+      Serial.println("⚠️ Line detected during MOVE_FORWARD_1!");
+      MotorsController::stop();
+      movementStartTime = millis();
+      state = AVOID_LINE_BACK;
+      break;
+    }
+
+    if ((distanceLeft > 0 && distanceLeft < ATTACK_THRESHOLD) ||
+        (distanceRight > 0 && distanceRight < ATTACK_THRESHOLD))
+    {
+      Serial.println("🟥 Enemy detected during MOVE_FORWARD_1! Attacking...");
+      MotorsController::forward();
+      movementStartTime = millis();
+      state = ATTACK;
+      break;
+    }
+
+    MotorsController::forward();
+    if (millis() - movementStartTime >= 800)
+    {
+      MotorsController::stop();
+      gyro.resetAngle();
+      gyro.setAngle(-90);
+      state = TURN_LEFT;
+    }
+    break;
+
+  case TURN_LEFT:
+    if (lineDetected)
+    {
+      Serial.println("⚠️ Line detected during TURN_LEFT!");
+      MotorsController::stop();
+      movementStartTime = millis();
+      state = AVOID_LINE_BACK;
+      break;
+    }
+
+    if ((distanceLeft > 0 && distanceLeft < ATTACK_THRESHOLD) ||
+        (distanceRight > 0 && distanceRight < ATTACK_THRESHOLD))
+    {
+      Serial.println("🟥 Enemy detected during TURN_LEFT! Attacking...");
+      MotorsController::forward();
+      movementStartTime = millis();
+      state = ATTACK;
+      break;
+    }
+
+    MotorsController::left();
+    Serial.print("[Turning Left] Angle: ");
+    Serial.println(angle);
+    if (!gyro.isTurning())
+    {
+      MotorsController::stop();
+      movementStartTime = millis();
+      state = MOVE_FORWARD_2;
+    }
+    break;
+
+  case MOVE_FORWARD_2:
+    if (lineDetected)
+    {
+      Serial.println("⚠️ Line detected during MOVE_FORWARD_2!");
+      MotorsController::stop();
+      movementStartTime = millis();
+      state = AVOID_LINE_BACK;
+      break;
+    }
+
+    if ((distanceLeft > 0 && distanceLeft < ATTACK_THRESHOLD) ||
+        (distanceRight > 0 && distanceRight < ATTACK_THRESHOLD))
+    {
+      Serial.println("🟥 Enemy detected during MOVE_FORWARD_2! Attacking...");
+      MotorsController::forward();
+      movementStartTime = millis();
+      state = ATTACK;
+      break;
+    }
+
+    MotorsController::forward();
+    if (millis() - movementStartTime >= 800)
+    {
+      MotorsController::stop();
+      gyro.resetAngle();
+      gyro.setAngle(90);
+      state = TURN_RIGHT;
+    }
+    break;
+
+  case AVOID_LINE_BACK:
+    MotorsController::backward();
+    if (millis() - movementStartTime >= 500)
+    {
+      MotorsController::stop();
+      gyro.resetAngle();
+      gyro.setAngle(180);
+      state = AVOID_LINE_TURN;
+    }
+    break;
+
+  case AVOID_LINE_TURN:
+    // ✅ Permitir detección de enemigo durante evasión
+    if ((distanceLeft > 0 && distanceLeft < ATTACK_THRESHOLD) ||
+        (distanceRight > 0 && distanceRight < ATTACK_THRESHOLD))
+    {
+      Serial.println("🟥 Enemy detected during AVOID_LINE_TURN! Attacking...");
+      MotorsController::forward();
+      movementStartTime = millis();
+      state = ATTACK;
+      break;
+    }
+
+    MotorsController::right();
+    Serial.print("[Turning Around] Angle: ");
+    Serial.println(angle);
+
+    if (!gyro.isTurning())
+    {
+      MotorsController::stop();
+      movementStartTime = millis();
+      state = MOVE_FORWARD_2;
+    }
+    break;
+
+  case ATTACK:
+    if (lineDetected)
+    {
+      Serial.println("⚠️ Line detected during ATTACK!");
+      MotorsController::stop();
+      movementStartTime = millis();
+      state = AVOID_LINE_BACK;
+      break;
+    }
+
+    if (millis() - movementStartTime >= 1000)
+    {
+      MotorsController::stop();
+      gyro.resetAngle();
+      gyro.setAngle(90);
+      state = TURN_RIGHT;
+    }
+    break;
   }
 }
+
+// void loop()
+// {
+//   const int ATTACK_THRESHOLD = 100; // milímetros
+//   int distanceLeft = SensorsManager::readDistance(SensorsManager::LEFT);
+//   int distanceRight = SensorsManager::readDistance(SensorsManager::RIGHT);
+//   float angle = gyro.getCurrentAngle();
+
+//     // Always check for line (edge)
+// if (SensorsManager::readLineSensor()) {
+//   MotorsController::stop();
+//   Serial.println("⚠️ Line detected! Interrupting current action.");
+//   movementStartTime = millis();
+//   state = AVOID_LINE_BACK;
+//   return;
+// }
+
+//   // Condición de ataque: si cualquiera detecta un objeto cerca
+// if ((state != AVOID_LINE_BACK &&
+//      state != AVOID_LINE_TURN &&
+//      state != ATTACK) &&  // evita reiniciar ataque
+//     ((distanceLeft > 0 && distanceLeft < ATTACK_THRESHOLD) ||
+//      (distanceRight > 0 && distanceRight < ATTACK_THRESHOLD)) &&
+//     !SensorsManager::readLineSensor())
+// {
+//   MotorsController::forward();
+//   Serial.println("🟥 ATTACK MODE: Charging!");
+//   movementStartTime = millis();
+//   state = ATTACK;
+//   return;
+// }
+
+//   switch (state)
+//   {
+//   case TURN_RIGHT:
+//     MotorsController::right();
+//     Serial.print("[Turning Right] Angle: ");
+//     Serial.println(angle);
+//     if (!gyro.isTurning())
+//     {
+//       MotorsController::stop();
+//       movementStartTime = millis();
+//       state = MOVE_FORWARD_1;
+//     }
+//     break;
+
+//   case MOVE_FORWARD_1:
+//     MotorsController::forward();
+//     if (millis() - movementStartTime >= 800)
+//     {
+//       MotorsController::stop();
+//       gyro.resetAngle();
+//       gyro.setAngle(-90); // Turn left next
+//       state = TURN_LEFT;
+//     }
+//     break;
+
+//   case TURN_LEFT:
+//     MotorsController::left();
+//     Serial.print("[Turning Left] Angle: ");
+//     Serial.println(angle);
+//     if (!gyro.isTurning())
+//     {
+//       MotorsController::stop();
+//       movementStartTime = millis();
+//       state = MOVE_FORWARD_2;
+//     }
+//     break;
+
+//   case MOVE_FORWARD_2:
+//     MotorsController::forward();
+//     if (millis() - movementStartTime >= 800)
+//     {
+//       MotorsController::stop();
+//       gyro.resetAngle();
+//       gyro.setAngle(90); // Return to right turn
+//       state = TURN_RIGHT;
+//     }
+//     break;
+
+//   case AVOID_LINE_BACK:
+//     MotorsController::backward();
+//     if (millis() - movementStartTime >= 500)
+//     {
+//       MotorsController::stop();
+//       gyro.resetAngle();
+//       gyro.setAngle(180); // Rotate 180°
+//       state = AVOID_LINE_TURN;
+//     }
+//     break;
+
+//   case AVOID_LINE_TURN:
+//     MotorsController::right(); // Could also use MotorsController::turnAround()
+//     Serial.print("[Turning Around] Angle: ");
+//     Serial.println(angle);
+//     if (!gyro.isTurning())
+//     {
+//       MotorsController::stop();
+//       movementStartTime = millis();
+//       state = MOVE_FORWARD_2; // Resume after evasion
+//     }
+//     break;
+
+//   case ATTACK:
+//   // Ya está en movimiento hacia adelante
+//   if (millis() - movementStartTime >= 1000) { // 1 segundo de ataque
+//     MotorsController::stop();
+//     gyro.resetAngle();
+//     gyro.setAngle(90); // O retoma ángulo deseado
+//     state = TURN_RIGHT;
+//   }
+//   break;
+//   }
+// }
